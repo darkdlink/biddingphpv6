@@ -1,27 +1,23 @@
 <?php
-// app/Models/Proposal.php
+// app/Models/Company.php
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-class Proposal extends Model
+class Company extends Model
 {
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
-        'bidding_id', 'value', 'description', 'status',
-        'profit_margin', 'total_cost', 'submission_date'
+        'name', 'cnpj', 'address', 'city', 'state',
+        'zip_code', 'phone', 'email', 'description'
     ];
 
-    protected $dates = [
-        'submission_date'
-    ];
-
-    public function bidding()
+    public function biddings()
     {
-        return $this->belongsTo(Bidding::class);
+        return $this->hasMany(Bidding::class);
     }
 
     public function documents()

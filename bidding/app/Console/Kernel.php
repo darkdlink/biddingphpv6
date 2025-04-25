@@ -7,12 +7,36 @@ use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
 class Kernel extends ConsoleKernel
 {
-    protected function schedule(Schedule $schedule)
+    /**
+     * Define the application's command schedule.
+     */
+    protected function schedule(Schedule $schedule): void
     {
-        // Executar scraping diariamente às 8h da manhã
-        $schedule->command('bids:scrape')->dailyAt('08:00');
+        // Executa a busca de licitações diariamente
+        $schedule->command('biddings:fetch')->daily();
 
-        // Enviar alertas de licitações que vencem em 3 dias
-        $schedule->command('bids:send-alerts --days=3')->dailyAt('09:00');
+        // Gera notificações diariamente
+        $schedule->command('notifications:generate')->daily();
+
+        // Limpa os arquivos de log a cada semana e mantém apenas os últimos 7 dias
+        $schedule->command('log:clear')->weekly();
     }
+
+    /**
+     * Register the commands for the application.
+     */
+    protected function commands(): void
+    {
+        $this->load(__DIR__.'/Commands');
+
+        require base_path('routes/console.php');
+    }
+
+    /**
+     * The Artisan commands provided by your application.
+     */
+    protected $commands = [
+        \App\Console\Commands\FetchBiddings::class,
+        \App\Console\Commands\GenerateNotifications::class,
+    ];
 }
