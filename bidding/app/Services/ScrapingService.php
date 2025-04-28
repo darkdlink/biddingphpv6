@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Bidding;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\DomCrawler\Crawler;
 
 class ScrapingService
@@ -25,45 +26,10 @@ class ScrapingService
             'url' => 'https://www.gov.br/compras/pt-br',
             'type' => 'governo-federal'
         ],
-        'portal-transparencia' => [
-            'name' => 'Portal da Transparência',
-            'url' => 'https://portaldatransparencia.gov.br/licitacoes',
-            'type' => 'governo-federal'
-        ],
-        'prefeitura-sp' => [
-            'name' => 'Prefeitura de São Paulo',
-            'url' => 'http://e-negocioscidadesp.prefeitura.sp.gov.br/BuscaLicitacao.aspx',
-            'type' => 'governo-municipal'
-        ],
-        'prefeitura-rj' => [
-            'name' => 'Prefeitura do Rio de Janeiro',
-            'url' => 'http://ecomprasrio.rio.rj.gov.br/editais/banners',
-            'type' => 'governo-municipal'
-        ],
-        'prefeitura-bh' => [
-            'name' => 'Prefeitura de Belo Horizonte',
-            'url' => 'https://prefeitura.pbh.gov.br/licitacoes',
-            'type' => 'governo-municipal'
-        ],
-        'governo-mg' => [
-            'name' => 'Governo de Minas Gerais',
-            'url' => 'https://www.compras.mg.gov.br',
+        'bec-sp' => [
+            'name' => 'BEC-SP (Bolsa Eletrônica de Compras)',
+            'url' => 'https://www.bec.sp.gov.br/becsp/aspx/HomePublico.aspx',
             'type' => 'governo-estadual'
-        ],
-        'governo-sp' => [
-            'name' => 'Governo de São Paulo',
-            'url' => 'https://www.bec.sp.gov.br',
-            'type' => 'governo-estadual'
-        ],
-        'petrobras' => [
-            'name' => 'Petrobras',
-            'url' => 'https://petrobras-fornecedores.com.br',
-            'type' => 'empresa-estatal'
-        ],
-        'bndes' => [
-            'name' => 'BNDES',
-            'url' => 'https://www.bndes.gov.br/wps/portal/site/home/transparencia/licitacoes-contratos',
-            'type' => 'empresa-estatal'
         ]
     ];
 
@@ -133,22 +99,54 @@ class ScrapingService
     public function searchBiddings($source, $filters = [])
     {
         $results = [];
-        $sources = is_array($source) ? $source : [$source];
+
+        // Se "all" for selecionado, usar todas as fontes
+        if ($source === 'all') {
+            $sources = array_keys($this->sources);
+        } else {
+            $sources = is_array($source) ? $source : [$source];
+        }
+
+        Log::info('Iniciando busca de licitações', [
+            'sources' => $sources,
+            'filters' => $filters
+        ]);
 
         foreach ($sources as $sourceKey) {
             if (!isset($this->sources[$sourceKey])) {
                 continue;
             }
 
-            $sourceResults = $this->searchInSource($sourceKey, $filters);
-            if ($sourceResults['success']) {
-                $results = array_merge($results, $sourceResults['data']);
+            try {
+                $sourceResults = $this->searchInSource($sourceKey, $filters);
+                if ($sourceResults['success']) {
+                    Log::info("Busca em {$sourceKey} concluída com sucesso", [
+                        'count' => count($sourceResults['data'])
+                    ]);
+
+                    $results = array_merge($results, $sourceResults['data']);
+                } else {
+                    Log::warning("Falha na busca em {$sourceKey}", [
+                        'message' => $sourceResults['message']
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::error("Erro ao buscar em {$sourceKey}", [
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString()
+                ]);
             }
         }
 
         // Aplicar filtros por segmento se especificado
         if (!empty($filters['segment'])) {
             $results = $this->filterBySegment($results, $filters['segment']);
+        }
+
+        // Limitar resultados (opcional)
+        $limit = $filters['limit'] ?? 50;
+        if (count($results) > $limit) {
+            $results = array_slice($results, 0, $limit);
         }
 
         // Ordenar resultados pela data de abertura (mais recentes primeiro)
@@ -215,7 +213,7 @@ class ScrapingService
     }
 
     /**
-     * Busca licitações no ComprasNet
+     * Busca licitações no ComprasNet (implementação real)
      *
      * @param array $filters Filtros de busca
      * @return array
@@ -223,65 +221,135 @@ class ScrapingService
     protected function searchInComprasnet($filters = [])
     {
         try {
-            $url = $this->sources['comprasnet']['url'];
+            $baseUrl = $this->sources['comprasnet']['url'];
 
             // Preparar parâmetros para o ComprasNet
             $params = [];
             if (!empty($filters['bidding_number'])) {
                 $params['numprp'] = $filters['bidding_number'];
             }
+
+            // Datas no formato dd/mm/aaaa
+            $startDate = null;
             if (!empty($filters['start_date'])) {
-                $startDate = is_string($filters['start_date']) ? $filters['start_date'] : $filters['start_date']->format('d/m/Y');
+                $startDate = date('d/m/Y', strtotime($filters['start_date']));
+                $params['dt_publ_ini'] = $startDate;
+            } else {
+                // Padrão: 30 dias atrás
+                $startDate = date('d/m/Y', strtotime('-30 days'));
                 $params['dt_publ_ini'] = $startDate;
             }
+
+            $endDate = null;
             if (!empty($filters['end_date'])) {
-                $endDate = is_string($filters['end_date']) ? $filters['end_date'] : $filters['end_date']->format('d/m/Y');
+                $endDate = date('d/m/Y', strtotime($filters['end_date']));
+                $params['dt_publ_fim'] = $endDate;
+            } else {
+                // Padrão: data atual
+                $endDate = date('d/m/Y');
                 $params['dt_publ_fim'] = $endDate;
             }
 
-            // Para fins de demonstração, vamos simular alguns resultados
-            // Em um ambiente real, você faria uma solicitação HTTP real
-            $results = [
-                [
-                    'bidding_number' => '10/2023',
-                    'title' => 'Aquisição de equipamentos de informática para laboratório de TI',
-                    'description' => 'Aquisição de computadores, servidores e equipamentos de rede para montagem de laboratório de TI',
-                    'opening_date' => '2023-05-20 10:00:00',
-                    'closing_date' => '2023-06-20 18:00:00',
-                    'modality' => 'pregao_eletronico',
-                    'status' => 'active',
-                    'estimated_value' => 500000.00,
-                    'url_source' => 'https://comprasnet.gov.br/exemplo/10-2023',
-                    'source' => 'comprasnet',
-                    'source_name' => 'ComprasNet'
-                ],
-                [
-                    'bidding_number' => '15/2023',
-                    'title' => 'Contratação de serviços de limpeza e conservação',
-                    'description' => 'Contratação de empresa especializada em serviços de limpeza, asseio e conservação predial com fornecimento de mão de obra',
-                    'opening_date' => '2023-05-25 14:00:00',
-                    'closing_date' => '2023-06-25 18:00:00',
-                    'modality' => 'concorrencia',
-                    'status' => 'pending',
-                    'estimated_value' => 1200000.00,
-                    'url_source' => 'https://comprasnet.gov.br/exemplo/15-2023',
-                    'source' => 'comprasnet',
-                    'source_name' => 'ComprasNet'
-                ],
-                [
-                    'bidding_number' => '22/2023',
-                    'title' => 'Aquisição de medicamentos para hospital universitário',
-                    'description' => 'Aquisição de medicamentos e insumos hospitalares para atender às necessidades do Hospital Universitário',
-                    'opening_date' => '2023-06-05 09:00:00',
-                    'closing_date' => '2023-07-05 18:00:00',
-                    'modality' => 'pregao_eletronico',
-                    'status' => 'active',
-                    'estimated_value' => 800000.00,
-                    'url_source' => 'https://comprasnet.gov.br/exemplo/22-2023',
-                    'source' => 'comprasnet',
-                    'source_name' => 'ComprasNet'
-                ],
-            ];
+            // Construir URL com parâmetros
+            $url = $baseUrl;
+            if (!empty($params)) {
+                $queryString = http_build_query($params);
+                $url .= '?' . $queryString;
+            }
+
+            Log::info("Buscando no ComprasNet", [
+                'url' => $url,
+                'params' => $params
+            ]);
+
+            // Fazer a requisição HTTP
+            $response = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language' => 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+            ])
+            ->timeout(30)
+            ->get($url);
+
+            if (!$response->successful()) {
+                Log::warning("Resposta não bem-sucedida do ComprasNet", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Falha ao acessar o ComprasNet. Código de status: ' . $response->status(),
+                    'data' => []
+                ];
+            }
+
+            $html = $response->body();
+            $crawler = new Crawler($html);
+
+            // Extrair dados da tabela de licitações
+            $results = [];
+
+            // No ComprasNet, a tabela de resultados geralmente tem uma classe específica
+            // Ajuste o seletor conforme necessário após inspecionar o HTML real
+            $crawler->filter('table.lista_pregao tr:not(:first-child)')->each(function(Crawler $row) use (&$results) {
+                try {
+                    // Extrair campos de cada linha
+                    $cells = $row->filter('td');
+
+                    if ($cells->count() >= 5) {
+                        $biddingNumber = trim($cells->eq(0)->text());
+                        $title = trim($cells->eq(1)->text());
+
+                        // Data no formato dd/mm/aaaa hh:mm
+                        $openingDateText = trim($cells->eq(2)->text());
+                        $openingDate = null;
+
+                        if (preg_match('/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/', $openingDateText, $matches)) {
+                            $openingDate = "{$matches[3]}-{$matches[2]}-{$matches[1]} {$matches[4]}:{$matches[5]}:00";
+                        }
+
+                        $modality = trim($cells->eq(3)->text());
+                        $status = trim($cells->eq(4)->text());
+
+                        // Extrair link para detalhes
+                        $detailsUrl = null;
+                        $linkNode = $cells->eq(0)->filter('a');
+                        if ($linkNode->count() > 0) {
+                            $href = $linkNode->attr('href');
+                            // Construir URL completa
+                            if (strpos($href, 'http') !== 0) {
+                                $detailsUrl = 'https://comprasnet.gov.br/livre/pregao/' . $href;
+                            } else {
+                                $detailsUrl = $href;
+                            }
+                        }
+
+                        // Normalizar valores
+                        $normalizedModality = $this->normalizeModality($modality);
+                        $normalizedStatus = $this->normalizeStatus($status);
+
+                        $results[] = [
+                            'bidding_number' => $biddingNumber,
+                            'title' => $title,
+                            'opening_date' => $openingDate,
+                            'modality' => $normalizedModality,
+                            'status' => $normalizedStatus,
+                            'url_source' => $detailsUrl,
+                            'source' => 'comprasnet',
+                            'source_name' => 'ComprasNet'
+                        ];
+                    }
+                } catch (\Exception $e) {
+                    Log::warning("Erro ao processar linha da tabela no ComprasNet", [
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            });
+
+            Log::info("Extração de dados do ComprasNet concluída", [
+                'count' => count($results)
+            ]);
 
             return [
                 'success' => true,
@@ -290,6 +358,11 @@ class ScrapingService
             ];
 
         } catch (\Exception $e) {
+            Log::error("Erro ao buscar no ComprasNet", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return [
                 'success' => false,
                 'message' => 'Erro ao buscar licitações no ComprasNet: ' . $e->getMessage(),
@@ -299,7 +372,7 @@ class ScrapingService
     }
 
     /**
-     * Busca licitações no Licitações-e do Banco do Brasil
+     * Busca licitações no Licitações-e do Banco do Brasil (implementação real)
      *
      * @param array $filters Filtros de busca
      * @return array
@@ -307,35 +380,121 @@ class ScrapingService
     protected function searchInLicitacoesE($filters = [])
     {
         try {
-            // Simulação de resultados
-            $results = [
-                [
-                    'bidding_number' => '987654',
-                    'title' => 'Reforma de escola municipal',
-                    'description' => 'Contratação de empresa especializada para reforma geral de escola municipal, incluindo pintura, estrutura elétrica e hidráulica',
-                    'opening_date' => '2023-06-10 10:00:00',
-                    'closing_date' => '2023-07-10 18:00:00',
-                    'modality' => 'pregao_eletronico',
-                    'status' => 'active',
-                    'estimated_value' => 1500000.00,
-                    'url_source' => 'https://licitacoes-e.com.br/exemplo/987654',
-                    'source' => 'licitacoes-e',
-                    'source_name' => 'Licitações-e (Banco do Brasil)'
-                ],
-                [
-                    'bidding_number' => '987655',
-                    'title' => 'Fornecimento de merenda escolar',
-                    'description' => 'Aquisição de alimentos para merenda escolar das escolas municipais',
-                    'opening_date' => '2023-06-15 09:00:00',
-                    'closing_date' => '2023-07-15 18:00:00',
-                    'modality' => 'pregao_eletronico',
-                    'status' => 'active',
-                    'estimated_value' => 900000.00,
-                    'url_source' => 'https://licitacoes-e.com.br/exemplo/987655',
-                    'source' => 'licitacoes-e',
-                    'source_name' => 'Licitações-e (Banco do Brasil)'
-                ]
+            $baseUrl = 'https://www.licitacoes-e.com.br/aop/pesquisar-licitacao.aop';
+
+            // Preparar parâmetros para o Licitações-e
+            $params = [
+                'opcao' => 'numeroLicitacao'
             ];
+
+            if (!empty($filters['bidding_number'])) {
+                $params['numeroLicitacao'] = $filters['bidding_number'];
+            }
+
+            // Outros filtros específicos do Licitações-e
+            if (!empty($filters['status'])) {
+                $statusMap = [
+                    'abertas' => 'A',
+                    'encerradas' => 'E',
+                    'todas' => 'T'
+                ];
+
+                if (isset($statusMap[$filters['status']])) {
+                    $params['pesquisarPor'] = $statusMap[$filters['status']];
+                }
+            }
+
+            Log::info("Buscando no Licitações-e", [
+                'url' => $baseUrl,
+                'params' => $params
+            ]);
+
+            // O Licitações-e utiliza formulário POST em vez de parâmetros GET
+            $response = Http::asForm()
+                ->withHeaders([
+                    'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language' => 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Referer' => 'https://www.licitacoes-e.com.br/'
+                ])
+                ->timeout(30)
+                ->post($baseUrl, $params);
+
+            if (!$response->successful()) {
+                Log::warning("Resposta não bem-sucedida do Licitações-e", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Falha ao acessar o Licitações-e. Código de status: ' . $response->status(),
+                    'data' => []
+                ];
+            }
+
+            $html = $response->body();
+            $crawler = new Crawler($html);
+
+            // Extrair dados da tabela de licitações
+            $results = [];
+
+            // No Licitações-e, a tabela geralmente tem um ID ou classe específica
+            $crawler->filter('table.lista_licitacao tr:not(:first-child)')->each(function(Crawler $row) use (&$results) {
+                try {
+                    $cells = $row->filter('td');
+
+                    if ($cells->count() >= 4) {
+                        $biddingNumber = trim($cells->eq(0)->text());
+                        $title = trim($cells->eq(1)->text());
+
+                        // Data no formato dd/mm/aaaa
+                        $openingDateText = trim($cells->eq(2)->text());
+                        $openingDate = null;
+
+                        if (preg_match('/(\d{2})\/(\d{2})\/(\d{4})/', $openingDateText, $matches)) {
+                            $openingDate = "{$matches[3]}-{$matches[2]}-{$matches[1]} 00:00:00";
+                        }
+
+                        $status = trim($cells->eq(3)->text());
+
+                        // Extrair link para detalhes
+                        $detailsUrl = null;
+                        $linkNode = $cells->eq(0)->filter('a');
+                        if ($linkNode->count() > 0) {
+                            $href = $linkNode->attr('href');
+                            // Construir URL completa
+                            if (strpos($href, 'http') !== 0) {
+                                $detailsUrl = 'https://www.licitacoes-e.com.br/aop/' . $href;
+                            } else {
+                                $detailsUrl = $href;
+                            }
+                        }
+
+                        // Normalizar valores
+                        $normalizedStatus = $this->normalizeStatus($status);
+
+                        $results[] = [
+                            'bidding_number' => $biddingNumber,
+                            'title' => $title,
+                            'opening_date' => $openingDate,
+                            'modality' => 'pregao_eletronico', // O Licitações-e geralmente usa pregão eletrônico
+                            'status' => $normalizedStatus,
+                            'url_source' => $detailsUrl,
+                            'source' => 'licitacoes-e',
+                            'source_name' => 'Licitações-e (Banco do Brasil)'
+                        ];
+                    }
+                } catch (\Exception $e) {
+                    Log::warning("Erro ao processar linha da tabela no Licitações-e", [
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            });
+
+            Log::info("Extração de dados do Licitações-e concluída", [
+                'count' => count($results)
+            ]);
 
             return [
                 'success' => true,
@@ -344,9 +503,144 @@ class ScrapingService
             ];
 
         } catch (\Exception $e) {
+            Log::error("Erro ao buscar no Licitações-e", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return [
                 'success' => false,
                 'message' => 'Erro ao buscar licitações no Licitações-e: ' . $e->getMessage(),
+                'data' => []
+            ];
+        }
+    }
+
+    /**
+     * Busca licitações na BEC-SP (implementação real)
+     *
+     * @param array $filters Filtros de busca
+     * @return array
+     */
+    protected function searchInBecSp($filters = [])
+    {
+        try {
+            $baseUrl = 'https://www.bec.sp.gov.br/BECSP/Home/GetOCs';
+
+            // Preparar parâmetros para a BEC-SP
+            $params = [
+                'chave' => '',
+                'paginaAtual' => '1',
+                'tamanhoPagina' => '20',
+                'orientacao' => 'descendente',
+                'colunaOrdenacao' => 'DataPublicacao'
+            ];
+
+            if (!empty($filters['bidding_number'])) {
+                $params['chave'] = $filters['bidding_number'];
+            }
+
+            if (!empty($filters['start_date'])) {
+                $startDate = date('d/m/Y', strtotime($filters['start_date']));
+                $params['dtPublicacaoInicio'] = $startDate;
+            }
+
+            if (!empty($filters['end_date'])) {
+                $endDate = date('d/m/Y', strtotime($filters['end_date']));
+                $params['dtPublicacaoFim'] = $endDate;
+            }
+
+            Log::info("Buscando na BEC-SP", [
+                'url' => $baseUrl,
+                'params' => $params
+            ]);
+
+            // A BEC-SP geralmente retorna dados JSON em vez de HTML
+            $response = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept' => 'application/json',
+                'X-Requested-With' => 'XMLHttpRequest',
+                'Referer' => 'https://www.bec.sp.gov.br/BECSP/Home/Home.aspx'
+            ])
+            ->timeout(30)
+            ->get($baseUrl, $params);
+
+            if (!$response->successful()) {
+                Log::warning("Resposta não bem-sucedida da BEC-SP", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Falha ao acessar a BEC-SP. Código de status: ' . $response->status(),
+                    'data' => []
+                ];
+            }
+
+            // Processar resposta JSON
+            $data = $response->json();
+            $results = [];
+
+            if (isset($data['registros']) && is_array($data['registros'])) {
+                foreach ($data['registros'] as $item) {
+                    try {
+                        $biddingNumber = $item['codigo'] ?? null;
+                        $title = $item['descricao'] ?? null;
+
+                        // Data no formato ISO ou similar
+                        $openingDate = null;
+                        if (isset($item['dataAbertura'])) {
+                            $openingDate = date('Y-m-d H:i:s', strtotime($item['dataAbertura']));
+                        }
+
+                        $status = $item['situacao'] ?? null;
+
+                        // Construir URL para detalhes
+                        $detailsUrl = "https://www.bec.sp.gov.br/BECSP/Pregao/DetalheOC.aspx?chave={$biddingNumber}";
+
+                        // Normalizar valores
+                        $normalizedStatus = $this->normalizeStatus($status);
+
+                        $results[] = [
+                            'bidding_number' => $biddingNumber,
+                            'title' => $title,
+                            'opening_date' => $openingDate,
+                            'modality' => 'pregao_eletronico', // A BEC-SP geralmente usa pregão eletrônico
+                            'status' => $normalizedStatus,
+                            'url_source' => $detailsUrl,
+                            'estimated_value' => $item['valorEstimado'] ?? null,
+                            'source' => 'bec-sp',
+                            'source_name' => 'BEC-SP (Bolsa Eletrônica de Compras)'
+                        ];
+                    } catch (\Exception $e) {
+                        Log::warning("Erro ao processar item JSON da BEC-SP", [
+                            'error' => $e->getMessage(),
+                            'item' => $item
+                        ]);
+                    }
+                }
+            }
+
+            Log::info("Extração de dados da BEC-SP concluída", [
+                'count' => count($results)
+            ]);
+
+            return [
+                'success' => true,
+                'message' => 'Busca realizada com sucesso na BEC-SP.',
+                'data' => $results
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("Erro ao buscar na BEC-SP", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return [
+                'success' => false,
+                'message' => 'Erro ao buscar licitações na BEC-SP: ' . $e->getMessage(),
                 'data' => []
             ];
         }
@@ -361,6 +655,10 @@ class ScrapingService
      */
     protected function searchGeneric($source, $filters = [])
     {
+        Log::info("Usando método genérico para fonte não implementada", [
+            'source' => $source
+        ]);
+
         // Para fontes não implementadas, retornamos uma lista vazia
         return [
             'success' => true,
@@ -416,9 +714,26 @@ class ScrapingService
     protected function updateGenericBidding(Bidding $bidding)
     {
         try {
-            $response = Http::get($bidding->url_source);
+            Log::info("Atualizando licitação via método genérico", [
+                'bidding_id' => $bidding->id,
+                'bidding_number' => $bidding->bidding_number,
+                'url' => $bidding->url_source
+            ]);
+
+            $response = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language' => 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+            ])
+            ->timeout(30)
+            ->get($bidding->url_source);
 
             if (!$response->successful()) {
+                Log::warning("Resposta não bem-sucedida ao atualizar licitação", [
+                    'status' => $response->status(),
+                    'body' => substr($response->body(), 0, 200) // Primeiros 200 caracteres apenas
+                ]);
+
                 return [
                     'success' => false,
                     'message' => 'Falha ao acessar a URL da fonte. Código de status: ' . $response->status()
@@ -429,27 +744,192 @@ class ScrapingService
             $crawler = new Crawler($html);
 
             // Tentar extrair informações genéricas
-            $title = $this->extractText($crawler, 'h1, .title, .bidding-title');
-            if ($title) {
+            $updated = false;
+
+            // Tentar extrair o título
+            $title = $this->extractText($crawler, 'h1, .title, .bidding-title, .licitacao-titulo');
+            if ($title && trim($title) !== '') {
                 $bidding->title = $title;
+                $updated = true;
+                Log::info("Título atualizado", ['title' => $title]);
             }
 
-            $description = $this->extractText($crawler, '.description, .content, .bidding-description');
-            if ($description) {
+            // Tentar extrair a descrição
+            $description = $this->extractText($crawler, '.description, .content, .bidding-description, .objeto, .objeto-licitacao');
+            if ($description && trim($description) !== '') {
                 $bidding->description = $description;
+                $updated = true;
+                Log::info("Descrição atualizada", ['length' => strlen($description)]);
             }
 
-            // Salvar alterações
-            $bidding->save();
+            // Tentar extrair a data de abertura
+            $openingDateText = $this->extractText($crawler, '.opening-date, .date-info, .data-abertura');
+            if ($openingDateText) {
+                // Tentar vários formatos de data
+                $formats = [
+                    'd/m/Y H:i', // 01/01/2023 10:00
+                    'd/m/Y', // 01/01/2023
+                    'Y-m-d H:i:s', // 2023-01-01 10:00:00
+                    'Y-m-d H:i', // 2023-01-01 10:00
+                    'Y-m-d', // 2023-01-01
+                ];
 
-            return [
-                'success' => true,
-                'message' => 'Licitação atualizada com sucesso via scraping.'
-            ];
+                foreach ($formats as $format) {
+                    $date = \DateTime::createFromFormat($format, trim($openingDateText));
+                    if ($date !== false) {
+                        $bidding->opening_date = $date->format('Y-m-d H:i:s');
+                        $updated = true;
+                        Log::info("Data de abertura atualizada", ['date' => $bidding->opening_date]);
+                        break;
+                    }
+                }
+            }
+
+            // Tentar extrair o valor estimado
+            $estimatedValueText = $this->extractText($crawler, '.estimated-value, .value-info, .valor-estimado, .valor-referencia');
+            if ($estimatedValueText) {
+                // Remove caracteres não numéricos, exceto vírgula e ponto
+                $estimatedValue = preg_replace('/[^\d,.]/', '', $estimatedValueText);
+                // Substitui vírgula por ponto para formato numérico
+                $estimatedValue = str_replace(',', '.', $estimatedValue);
+
+                if (is_numeric($estimatedValue)) {
+                    $bidding->estimated_value = (float) $estimatedValue;
+                    $updated = true;
+                    Log::info("Valor estimado atualizado", ['value' => $bidding->estimated_value]);
+                }
+            }
+
+            if ($updated) {
+                // Salvar alterações
+                $bidding->save();
+                Log::info("Licitação atualizada com sucesso", ['bidding_id' => $bidding->id]);
+
+                return [
+                    'success' => true,
+                    'message' => 'Licitação atualizada com sucesso via scraping.'
+                ];
+            } else {
+                Log::warning("Nenhuma informação útil encontrada para atualizar", ['bidding_id' => $bidding->id]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Nenhuma informação útil encontrada para atualizar a licitação.'
+                ];
+            }
         } catch (\Exception $e) {
+            Log::error("Erro ao atualizar licitação via scraping", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return [
                 'success' => false,
                 'message' => 'Erro ao realizar scraping: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Método específico para atualizar licitação do ComprasNet
+     *
+     * @param Bidding $bidding Objeto da licitação
+     * @return array Resultado da operação
+     */
+    protected function updateComprasnetBidding(Bidding $bidding)
+    {
+        try {
+            Log::info("Atualizando licitação do ComprasNet", [
+                'bidding_id' => $bidding->id,
+                'bidding_number' => $bidding->bidding_number,
+                'url' => $bidding->url_source
+            ]);
+
+            $response = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language' => 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+            ])
+            ->timeout(30)
+            ->get($bidding->url_source);
+
+            if (!$response->successful()) {
+                Log::warning("Resposta não bem-sucedida ao atualizar licitação do ComprasNet", [
+                    'status' => $response->status()
+                ]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Falha ao acessar a URL da fonte. Código de status: ' . $response->status()
+                ];
+            }
+
+            $html = $response->body();
+            $crawler = new Crawler($html);
+
+            $updated = false;
+
+            // No ComprasNet, o objeto geralmente está em um campo específico
+            $description = $this->extractText($crawler, '#btnSrchObjeto + table td.tex3');
+            if ($description && trim($description) !== '') {
+                $bidding->description = $description;
+                $updated = true;
+                Log::info("Descrição atualizada do ComprasNet", ['length' => strlen($description)]);
+            }
+
+            // Data de abertura geralmente está em uma tabela específica
+            $openingDateText = $this->extractText($crawler, 'table.tex3 tr:contains("Data de Realização:") td:last-child');
+            if ($openingDateText) {
+                // O formato geralmente é dd/mm/aaaa hh:mm
+                if (preg_match('/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/', $openingDateText, $matches)) {
+                    $openingDate = "{$matches[3]}-{$matches[2]}-{$matches[1]} {$matches[4]}:{$matches[5]}:00";
+                    $bidding->opening_date = $openingDate;
+                    $updated = true;
+                    Log::info("Data de abertura atualizada do ComprasNet", ['date' => $openingDate]);
+                }
+            }
+
+            // Valor estimado geralmente está em uma tabela específica
+            $estimatedValueText = $this->extractText($crawler, 'table.tex3 tr:contains("Valor Estimado:") td:last-child');
+            if ($estimatedValueText) {
+                // Remove R$ e outros caracteres, mantém apenas números, vírgula e ponto
+                $estimatedValue = preg_replace('/[^\d,.]/', '', $estimatedValueText);
+                // Substitui vírgula por ponto para formato numérico
+                $estimatedValue = str_replace(',', '.', $estimatedValue);
+
+                if (is_numeric($estimatedValue)) {
+                    $bidding->estimated_value = (float) $estimatedValue;
+                    $updated = true;
+                    Log::info("Valor estimado atualizado do ComprasNet", ['value' => $bidding->estimated_value]);
+                }
+            }
+
+            if ($updated) {
+                // Salvar alterações
+                $bidding->save();
+                Log::info("Licitação do ComprasNet atualizada com sucesso", ['bidding_id' => $bidding->id]);
+
+                return [
+                    'success' => true,
+                    'message' => 'Licitação atualizada com sucesso via scraping do ComprasNet.'
+                ];
+            } else {
+                Log::warning("Nenhuma informação útil encontrada para atualizar do ComprasNet", ['bidding_id' => $bidding->id]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Nenhuma informação útil encontrada para atualizar a licitação do ComprasNet.'
+                ];
+            }
+        } catch (\Exception $e) {
+            Log::error("Erro ao atualizar licitação do ComprasNet via scraping", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return [
+                'success' => false,
+                'message' => 'Erro ao realizar scraping do ComprasNet: ' . $e->getMessage()
             ];
         }
     }
@@ -464,14 +944,81 @@ class ScrapingService
     protected function extractText(Crawler $crawler, $selector)
     {
         try {
-            $node = $crawler->filter($selector)->first();
+            $node = $crawler->filter($selector);
             if ($node->count() > 0) {
                 return trim($node->text());
             }
         } catch (\Exception $e) {
             // Silenciar erros de seletor não encontrado
+            Log::debug("Seletor não encontrado: {$selector}", [
+                'error' => $e->getMessage()
+            ]);
         }
 
         return null;
+    }
+
+    /**
+     * Normaliza o tipo de modalidade de licitação
+     *
+     * @param string $modalityText
+     * @return string
+     */
+    protected function normalizeModality($modalityText)
+    {
+        $modalityText = strtolower($modalityText);
+
+        if (strpos($modalityText, 'pregão eletrônico') !== false || strpos($modalityText, 'pregao eletronico') !== false) {
+            return 'pregao_eletronico';
+        } else if (strpos($modalityText, 'pregão presencial') !== false || strpos($modalityText, 'pregao presencial') !== false) {
+            return 'pregao_presencial';
+        } else if (strpos($modalityText, 'concorrência') !== false || strpos($modalityText, 'concorrencia') !== false) {
+            return 'concorrencia';
+        } else if (strpos($modalityText, 'tomada de preço') !== false || strpos($modalityText, 'tomada de preco') !== false) {
+            return 'tomada_precos';
+        } else if (strpos($modalityText, 'convite') !== false) {
+            return 'convite';
+        } else if (strpos($modalityText, 'leilão') !== false || strpos($modalityText, 'leilao') !== false) {
+            return 'leilao';
+        } else if (strpos($modalityText, 'concurso') !== false) {
+            return 'concurso';
+        }
+
+        return 'outros';
+    }
+
+    /**
+     * Normaliza o status da licitação
+     *
+     * @param string $statusText
+     * @return string
+     */
+    protected function normalizeStatus($statusText)
+    {
+        $statusText = strtolower($statusText);
+
+        if (strpos($statusText, 'aberto') !== false ||
+            strpos($statusText, 'abertura') !== false ||
+            strpos($statusText, 'em andamento') !== false ||
+            strpos($statusText, 'vigente') !== false) {
+            return 'active';
+        } else if (strpos($statusText, 'encerrado') !== false ||
+                  strpos($statusText, 'finalizado') !== false ||
+                  strpos($statusText, 'homologado') !== false ||
+                  strpos($statusText, 'adjudicado') !== false) {
+            return 'finished';
+        } else if (strpos($statusText, 'suspenso') !== false ||
+                  strpos($statusText, 'cancelado') !== false ||
+                  strpos($statusText, 'revogado') !== false ||
+                  strpos($statusText, 'anulado') !== false) {
+            return 'canceled';
+        } else if (strpos($statusText, 'aguardando') !== false ||
+                  strpos($statusText, 'futuro') !== false ||
+                  strpos($statusText, 'agendado') !== false ||
+                  strpos($statusText, 'publicado') !== false) {
+            return 'pending';
+        }
+
+        return 'pending'; // Status padrão se não for identificado
     }
 }

@@ -1,5 +1,5 @@
 <?php
-
+// app/Console/Kernel.php
 namespace App\Console;
 
 use Illuminate\Console\Scheduling\Schedule;
@@ -12,14 +12,19 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        // Executa a busca de licitações diariamente
-        $schedule->command('biddings:fetch')->daily();
+        // Buscar licitações diariamente
+        $schedule->command('biddings:fetch')->dailyAt('03:00')
+            ->appendOutputTo(storage_path('logs/biddings-fetch.log'));
 
-        // Gera notificações diariamente
-        $schedule->command('notifications:generate')->daily();
-
-        // Limpa os arquivos de log a cada semana e mantém apenas os últimos 7 dias
-        $schedule->command('log:clear')->weekly();
+        // Buscar licitações específicas para cada segmento uma vez por semana
+        $segments = ['tecnologia', 'saude', 'educacao', 'construcao', 'servicos'];
+        foreach ($segments as $index => $segment) {
+            // Distribuir ao longo da semana
+            $dayOfWeek = ($index % 5) + 1; // 1=Monday, 5=Friday
+            $schedule->command("biddings:fetch --segment={$segment} --days=30")
+                ->weeklyOn($dayOfWeek, '04:00')
+                ->appendOutputTo(storage_path("logs/biddings-fetch-{$segment}.log"));
+        }
     }
 
     /**
@@ -31,12 +36,4 @@ class Kernel extends ConsoleKernel
 
         require base_path('routes/console.php');
     }
-
-    /**
-     * The Artisan commands provided by your application.
-     */
-    protected $commands = [
-        \App\Console\Commands\FetchBiddings::class,
-        \App\Console\Commands\GenerateNotifications::class,
-    ];
 }

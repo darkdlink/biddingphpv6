@@ -155,256 +155,349 @@ class BiddingController extends Controller
     }
     }
 
+    /**
+     * Importa uma licitação para o sistema
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\RedirectResponse
+     */
     public function import(Request $request)
-{
-    $validator = Validator::make($request->all(), [
-        'bidding_number' => 'required|unique:biddings,bidding_number',
-        'title' => 'required',
-        'opening_date' => 'required|date',
-        'modality' => 'required',
-        'status' => 'required',
-    ]);
-
-    if ($validator->fails()) {
-        return redirect()->route('biddings.search')
-            ->withErrors($validator)
-            ->with('error', 'Erro ao importar licitação: esta licitação já pode estar cadastrada.');
-    }
-
-    // Obter a empresa padrão
-    $defaultCompany = \App\Models\Company::first();
-
-    if (!$defaultCompany) {
-        return redirect()->route('biddings.search')
-            ->with('error', 'Erro ao importar licitação: nenhuma empresa cadastrada para associar à licitação.');
-    }
-
-    $bidding = new \App\Models\Bidding();
-    $bidding->bidding_number = $request->bidding_number;
-    $bidding->title = $request->title;
-    $bidding->opening_date = $request->opening_date;
-    $bidding->closing_date = $request->closing_date;
-    $bidding->modality = $request->modality;
-    $bidding->status = $request->status;
-    $bidding->url_source = $request->url_source;
-    $bidding->company_id = $defaultCompany->id;
-    $bidding->estimated_value = $request->estimated_value;
-    $bidding->description = $request->description;
-    $bidding->save();
-
-    return redirect()->route('biddings.show', $bidding->id)
-        ->with('success', 'Licitação importada com sucesso!');
-}
-
-    public function showSearchForm(Request $request)
     {
-        // Instanciar o serviço de scraping
-        $scrapingService = new ScrapingService();
+        $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+            'bidding_number' => 'required|unique:biddings,bidding_number',
+            'title' => 'required',
+            'opening_date' => 'nullable|date',
+            'modality' => 'required',
+            'status' => 'required',
+        ]);
 
-        // Obter fontes e segmentos
-        $sources = $scrapingService->getSources();
-        $segments = $scrapingService->getSegments();
+        if ($validator->fails()) {
+            return redirect()->route('biddings.search')
+                ->withErrors($validator)
+                ->with('error', 'Erro ao importar licitação: esta licitação já pode estar cadastrada.');
+        }
 
-        // Parâmetros da requisição
-        $selectedSources = $request->input('sources', array_keys($sources)[0]);
-        $segment = $request->input('segment', '');
-        $searchResults = null;
+        // Obter a empresa padrão (ou permitir seleção pelo usuário)
+        $defaultCompany = \App\Models\Company::first();
 
-        // Verificar se é uma busca
-        if ($request->has('search') && $request->search == '1') {
-            // Preparar filtros
-            $filters = [
-                'bidding_number' => $request->input('bidding_number'),
-                'start_date' => $request->input('start_date'),
-                'end_date' => $request->input('end_date'),
-                'segment' => $segment
-            ];
+        if (!$defaultCompany) {
+            return redirect()->route('biddings.search')
+                ->with('error', 'Erro ao importar licitação: nenhuma empresa cadastrada para associar à licitação.');
+        }
 
-            // Realizar busca
-            $searchResult = $scrapingService->searchBiddings($selectedSources, $filters);
-            if ($searchResult['success']) {
-                $searchResults = $searchResult['data'];
+        try {
+            \Illuminate\Support\Facades\Log::info('Importando licitação', [
+                'bidding_number' => $request->bidding_number,
+                'title' => $request->title
+            ]);
+
+            $bidding = new \App\Models\Bidding();
+            $bidding->bidding_number = $request->bidding_number;
+            $bidding->title = $request->title;
+            $bidding->opening_date = $request->opening_date ?: now();
+            $bidding->closing_date = $request->closing_date;
+            $bidding->modality = $request->modality;
+            $bidding->status = $request->status;
+            $bidding->url_source = $request->url_source;
+            $bidding->estimated_value = $request->estimated_value;
+            $bidding->description = $request->description;
+            $bidding->company_id = $defaultCompany->id;
+            $bidding->save();
+
+            \Illuminate\Support\Facades\Log::info('Licitação importada com sucesso', [
+                'bidding_id' => $bidding->id
+            ]);
+
+            return redirect()->route('biddings.show', $bidding->id)
+                ->with('success', 'Licitação importada com sucesso!');
+
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Erro ao importar licitação', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return redirect()->route('biddings.search')
+                ->with('error', 'Erro ao importar licitação: ' . $e->getMessage());
+        }
+    }
+
+/**
+ * Busca de licitações com filtro por segmento
+ */
+public function showSearchForm(Request $request)
+{
+    // Instanciar o serviço de scraping
+    $scrapingService = new \App\Services\ScrapingService();
+
+    // Obter fontes e segmentos
+    $sources = $scrapingService->getSources();
+    $segments = $scrapingService->getSegments();
+
+    // Parâmetros da requisição
+    $selectedSources = $request->input('sources', ['comprasnet']);
+    if (!is_array($selectedSources) && $selectedSources != 'all') {
+        $selectedSources = [$selectedSources];
+    }
+
+    $segment = $request->input('segment', '');
+    $searchResults = null;
+
+    // Verificar se é uma busca
+    if ($request->has('search') && $request->search == '1') {
+        // Preparar filtros
+        $filters = [
+            'bidding_number' => $request->input('bidding_number'),
+            'start_date' => $request->input('start_date'),
+            'end_date' => $request->input('end_date'),
+            'segment' => $segment,
+            'limit' => 50 // Limitar resultados para melhor desempenho
+        ];
+
+        // Adicionar filtros específicos por fonte
+        if ($request->has('codigo')) {
+            $filters['codigo'] = $request->input('codigo');
+        }
+
+        if ($request->has('status')) {
+            $filters['status'] = $request->input('status');
+        }
+
+        if ($request->has('texto')) {
+            $filters['texto'] = $request->input('texto');
+        }
+
+        if ($request->has('modalidade')) {
+            $filters['modalidade'] = $request->input('modalidade');
+        }
+
+        // Log para debug
+        \Illuminate\Support\Facades\Log::info('Iniciando busca de licitações', [
+            'sources' => $selectedSources,
+            'segment' => $segment,
+            'filters' => $filters
+        ]);
+
+        // Realizar busca
+        $searchResult = $scrapingService->searchBiddings($selectedSources, $filters);
+
+        \Illuminate\Support\Facades\Log::info('Resultado da busca', [
+            'success' => $searchResult['success'],
+            'count' => $searchResult['count'] ?? 0
+        ]);
+
+        if ($searchResult['success']) {
+            $searchResults = $searchResult['data'];
+        }
+    }
+
+    // Retornar página HTML
+    $html = '<!DOCTYPE html>
+    <html lang="pt-br">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Busca de Licitações - Sistema de Licitações</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css">
+        <style>
+            .search-container {
+                background-color: #f8f9fa;
+                border-radius: 10px;
+                padding: 20px;
+                margin-bottom: 20px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
-        }
-
-        // Retornar página HTML diretamente
-        $html = '<!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Busca de Licitações - Sistema de Licitações</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css">
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css">
-            <style>
-                .search-container {
-                    background-color: #f8f9fa;
-                    border-radius: 10px;
-                    padding: 20px;
-                    margin-bottom: 20px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }
-                .result-card {
-                    transition: transform 0.3s;
-                    height: 100%;
-                }
-                .result-card:hover {
-                    transform: translateY(-5px);
-                    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-                }
-                .source-badge {
-                    position: absolute;
-                    top: 10px;
-                    right: 10px;
-                    font-size: 0.8rem;
-                }
-                .segment-badge {
-                    border-radius: 15px;
-                    padding: 5px 10px;
-                    font-size: 0.8rem;
-                    margin-right: 5px;
-                    margin-bottom: 5px;
-                    display: inline-block;
-                }
-                .select2-container {
-                    width: 100% !important;
-                }
-            </style>
-        </head>';
-
-        // Incluir o header
-        if (file_exists(resource_path('views/layout/header.php'))) {
-            ob_start();
-            include(resource_path('views/layout/header.php'));
-            $html .= ob_get_clean();
-        } else {
-            $html .= '<header class="bg-dark text-white p-3 mb-4">
-                <div class="container">
-                    <h1>Sistema de Licitações</h1>
-                </div>
-            </header>';
-        }
-
-        $html .= '<div class="container-fluid py-4">
-            <div class="row mb-4">
-                <div class="col-12">
-                    <h1><i class="fas fa-search me-2"></i>Busca Avançada de Licitações</h1>
-                    <p class="text-muted">Encontre licitações em diversas fontes e filtre por segmento de negócio</p>
-                </div>
-            </div>';
-
-        // Mensagens de sucesso/erro
-        if (session('success')) {
-            $html .= '<div class="alert alert-success alert-dismissible fade show">
-                ' . session('success') . '
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>';
-        }
-
-        if (session('error')) {
-            $html .= '<div class="alert alert-danger alert-dismissible fade show">
-                ' . session('error') . '
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>';
-        }
-
-        $html .= '<div class="search-container card">
-            <div class="card-body">
-                <form method="GET" action="' . route('biddings.search') . '" id="searchForm">
-                    <input type="hidden" name="search" value="1">
-
-                    <div class="row mb-3">
-                        <div class="col-md-6">
-                            <label for="sources" class="form-label">Fontes de Licitações</label>
-                            <select class="form-select select2" id="sources" name="sources" multiple>
-                                <option value="all" ' . ($selectedSources == 'all' ? 'selected' : '') . '>Todas as Fontes</option>';
-
-        // Agrupar fontes por tipo
-        $sourcesByType = [];
-        foreach ($sources as $key => $source) {
-            $type = $source['type'];
-            if (!isset($sourcesByType[$type])) {
-                $sourcesByType[$type] = [];
+            .result-card {
+                transition: transform 0.3s;
+                height: 100%;
             }
-            $sourcesByType[$type][$key] = $source;
-        }
-
-        // Exibir fontes agrupadas
-        foreach ($sourcesByType as $type => $typeItems) {
-            $typeName = ucfirst(str_replace('-', ' ', $type));
-            $html .= '<optgroup label="' . $typeName . '">';
-
-            foreach ($typeItems as $key => $source) {
-                $selected = (is_array($selectedSources) && in_array($key, $selectedSources)) || $selectedSources == $key ? 'selected' : '';
-                $html .= '<option value="' . $key . '" ' . $selected . '>' . $source['name'] . '</option>';
+            .result-card:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
             }
+            .source-badge {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                font-size: 0.8rem;
+            }
+            .segment-badge {
+                border-radius: 15px;
+                padding: 5px 10px;
+                font-size: 0.8rem;
+                margin-right: 5px;
+                margin-bottom: 5px;
+                display: inline-block;
+            }
+            .select2-container {
+                width: 100% !important;
+            }
+            .loader {
+                display: none;
+                border: 5px solid #f3f3f3;
+                border-radius: 50%;
+                border-top: 5px solid #3498db;
+                width: 30px;
+                height: 30px;
+                animation: spin 2s linear infinite;
+                margin-left: 10px;
+            }
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+        </style>
+    </head>';
 
-            $html .= '</optgroup>';
-        }
+    // Incluir o header
+    if (file_exists(resource_path('views/layout/header.php'))) {
+        ob_start();
+        include(resource_path('views/layout/header.php'));
+        $html .= ob_get_clean();
+    } else {
+        $html .= '<header class="bg-dark text-white p-3 mb-4">
+            <div class="container">
+                <h1>Sistema de Licitações</h1>
+            </div>
+        </header>';
+    }
 
-        $html .= '</select>
-                        </div>
-                        <div class="col-md-6">
-                            <label for="segment" class="form-label">Segmento de Negócio</label>
-                            <select class="form-select select2" id="segment" name="segment">
-                                <option value="">Todos os Segmentos</option>';
-
-        foreach ($segments as $key => $segmentData) {
-            $selected = $segment == $key ? 'selected' : '';
-            $html .= '<option value="' . $key . '" ' . $selected . '>' . $segmentData['name'] . '</option>';
-        }
-
-        $html .= '</select>
-                        </div>
-                    </div>
-
-                    <div class="row mb-3">
-                        <div class="col-md-4">
-                            <label for="bidding_number" class="form-label">Número/Código da Licitação</label>
-                            <input type="text" class="form-control" id="bidding_number" name="bidding_number"
-                                   placeholder="Ex: 123456" value="' . $request->input('bidding_number', '') . '">
-                        </div>
-                        <div class="col-md-4">
-                            <label for="start_date" class="form-label">Data Inicial</label>
-                            <input type="date" class="form-control" id="start_date" name="start_date" value="' . $request->input('start_date', '') . '">
-                        </div>
-                        <div class="col-md-4">
-                            <label for="end_date" class="form-label">Data Final</label>
-                            <input type="date" class="form-control" id="end_date" name="end_date" value="' . $request->input('end_date', '') . '">
-                        </div>
-                    </div>
-
-                    <div class="d-flex justify-content-end">
-                        <button type="submit" class="btn btn-primary">
-                            <i class="fas fa-search me-1"></i> Buscar Licitações
-                        </button>
-                    </div>
-                </form>
+    $html .= '<div class="container-fluid py-4">
+        <div class="row mb-4">
+            <div class="col-12">
+                <h1><i class="fas fa-search me-2"></i>Busca Avançada de Licitações</h1>
+                <p class="text-muted">Encontre licitações em diversas fontes e filtre por segmento de negócio</p>
             </div>
         </div>';
 
-        // Resultados da busca, se disponíveis
-        if ($searchResults) {
-            $html .= '<div class="card mt-4">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5><i class="fas fa-list me-2"></i>Resultados da Busca</h5>
-                    <span class="badge bg-primary">' . count($searchResults) . ' licitações encontradas</span>
-                </div>
-                <div class="card-body">
-                    <div class="row">';
+    // Mensagens de sucesso/erro
+    if (session('success')) {
+        $html .= '<div class="alert alert-success alert-dismissible fade show">
+            ' . session('success') . '
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>';
+    }
 
+    if (session('error')) {
+        $html .= '<div class="alert alert-danger alert-dismissible fade show">
+            ' . session('error') . '
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>';
+    }
+
+    $html .= '<div class="search-container card">
+        <div class="card-body">
+            <form method="GET" action="' . route('biddings.search') . '" id="searchForm">
+                <input type="hidden" name="search" value="1">
+
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label for="sources" class="form-label">Fontes de Licitações</label>
+                        <select class="form-select select2" id="sources" name="sources[]" multiple>
+                            <option value="all" ' . ($selectedSources == 'all' ? 'selected' : '') . '>Todas as Fontes</option>';
+
+    // Agrupar fontes por tipo
+    $sourcesByType = [];
+    foreach ($sources as $key => $source) {
+        $type = $source['type'];
+        if (!isset($sourcesByType[$type])) {
+            $sourcesByType[$type] = [];
+        }
+        $sourcesByType[$type][$key] = $source;
+    }
+
+    // Exibir fontes agrupadas
+    foreach ($sourcesByType as $type => $typeItems) {
+        $typeName = ucwords(str_replace('-', ' ', $type));
+        $html .= '<optgroup label="' . $typeName . '">';
+
+        foreach ($typeItems as $key => $source) {
+            $selected = (is_array($selectedSources) && in_array($key, $selectedSources)) ? 'selected' : '';
+            $html .= '<option value="' . $key . '" ' . $selected . '>' . $source['name'] . '</option>';
+        }
+
+        $html .= '</optgroup>';
+    }
+
+    $html .= '</select>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="segment" class="form-label">Segmento de Negócio</label>
+                        <select class="form-select select2" id="segment" name="segment">
+                            <option value="">Todos os Segmentos</option>';
+
+    foreach ($segments as $key => $segmentData) {
+        $selected = $segment == $key ? 'selected' : '';
+        $html .= '<option value="' . $key . '" ' . $selected . '>' . $segmentData['name'] . '</option>';
+    }
+
+    $html .= '</select>
+                    </div>
+                </div>
+
+                <div class="row mb-3">
+                    <div class="col-md-4">
+                        <label for="bidding_number" class="form-label">Número/Código da Licitação</label>
+                        <input type="text" class="form-control" id="bidding_number" name="bidding_number"
+                               placeholder="Ex: 123456" value="' . $request->input('bidding_number', '') . '">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="start_date" class="form-label">Data Inicial</label>
+                        <input type="date" class="form-control" id="start_date" name="start_date" value="' . $request->input('start_date', '') . '">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="end_date" class="form-label">Data Final</label>
+                        <input type="date" class="form-control" id="end_date" name="end_date" value="' . $request->input('end_date', '') . '">
+                    </div>
+                </div>
+
+                <div class="d-flex justify-content-end align-items-center">
+                    <button type="submit" class="btn btn-primary d-flex align-items-center" id="searchButton">
+                        <i class="fas fa-search me-1"></i> Buscar Licitações
+                        <div class="loader ms-2" id="searchLoader"></div>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>';
+
+    // Resultados da busca, se disponíveis
+    if ($searchResults) {
+        $html .= '<div class="card mt-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5><i class="fas fa-list me-2"></i>Resultados da Busca</h5>
+                <span class="badge bg-primary">' . count($searchResults) . ' licitações encontradas</span>
+            </div>
+            <div class="card-body">
+                <div class="row">';
+
+        if (count($searchResults) > 0) {
             foreach ($searchResults as $result) {
+                // Determinar classe de status
                 $statusClass = '';
-                if ($result['status'] == 'active') {
-                    $statusClass = 'bg-primary';
-                } elseif ($result['status'] == 'pending') {
-                    $statusClass = 'bg-warning';
-                } elseif ($result['status'] == 'finished') {
-                    $statusClass = 'bg-success';
-                } else {
-                    $statusClass = 'bg-danger';
+                switch ($result['status']) {
+                    case 'active':
+                        $statusClass = 'bg-primary';
+                        $statusLabel = 'Ativa';
+                        break;
+                    case 'pending':
+                        $statusClass = 'bg-warning text-dark';
+                        $statusLabel = 'Pendente';
+                        break;
+                    case 'finished':
+                        $statusClass = 'bg-success';
+                        $statusLabel = 'Finalizada';
+                        break;
+                    case 'canceled':
+                        $statusClass = 'bg-danger';
+                        $statusLabel = 'Cancelada';
+                        break;
+                    default:
+                        $statusClass = 'bg-secondary';
+                        $statusLabel = ucfirst($result['status']);
                 }
 
                 // Detectar segmentos relacionados
@@ -421,17 +514,17 @@ class BiddingController extends Controller
 
                 $html .= '<div class="col-md-6 col-lg-4 mb-4">
                     <div class="card result-card">
-                        <div class="card-header">
+                        <div class="card-header position-relative">
                             <span class="badge ' . $statusClass . '">
-                                ' . ucfirst($result['status']) . '
+                                ' . $statusLabel . '
                             </span>
                             <span class="badge bg-secondary source-badge">
                                 ' . ($result['source_name'] ?? ucfirst($result['source'])) . '
                             </span>
-                            <h6 class="mt-2 mb-0">' . $result['bidding_number'] . '</h6>
+                            <h6 class="mt-2 mb-0">' . htmlspecialchars($result['bidding_number']) . '</h6>
                         </div>
                         <div class="card-body">
-                            <h5 class="card-title">' . $result['title'] . '</h5>
+                            <h5 class="card-title">' . htmlspecialchars($result['title']) . '</h5>
                             <p class="card-text text-muted">
                                 <i class="fas fa-calendar me-1"></i>
                                 ' . (isset($result['opening_date']) ? date('d/m/Y H:i', strtotime($result['opening_date'])) : 'Data não informada') . '
@@ -450,7 +543,7 @@ class BiddingController extends Controller
 
                 if (!empty($result['description'])) {
                     $desc = strlen($result['description']) > 150 ? substr($result['description'], 0, 147) . '...' : $result['description'];
-                    $html .= '<p class="card-text small">' . $desc . '</p>';
+                    $html .= '<p class="card-text small">' . htmlspecialchars($desc) . '</p>';
                 }
 
                 if (!empty($relatedSegments)) {
@@ -463,17 +556,17 @@ class BiddingController extends Controller
 
                 $html .= '</div>
                         <div class="card-footer d-flex justify-content-between">
-                            <form method="POST" action="' . route('biddings.import') . '">
+                            <form method="POST" action="' . route('biddings.import') . '" class="import-form">
                                 ' . csrf_field() . '
-                                <input type="hidden" name="bidding_number" value="' . $result['bidding_number'] . '">
-                                <input type="hidden" name="title" value="' . $result['title'] . '">
+                                <input type="hidden" name="bidding_number" value="' . htmlspecialchars($result['bidding_number']) . '">
+                                <input type="hidden" name="title" value="' . htmlspecialchars($result['title']) . '">
                                 <input type="hidden" name="opening_date" value="' . ($result['opening_date'] ?? '') . '">
                                 <input type="hidden" name="closing_date" value="' . ($result['closing_date'] ?? '') . '">
                                 <input type="hidden" name="modality" value="' . $result['modality'] . '">
                                 <input type="hidden" name="status" value="' . $result['status'] . '">
-                                <input type="hidden" name="url_source" value="' . $result['url_source'] . '">
+                                <input type="hidden" name="url_source" value="' . htmlspecialchars($result['url_source']) . '">
                                 <input type="hidden" name="estimated_value" value="' . ($result['estimated_value'] ?? '') . '">
-                                <input type="hidden" name="description" value="' . ($result['description'] ?? '') . '">
+                                <input type="hidden" name="description" value="' . htmlspecialchars($result['description'] ?? '') . '">
 
                                 <button type="submit" class="btn btn-success btn-sm">
                                     <i class="fas fa-download me-1"></i> Importar
@@ -481,7 +574,7 @@ class BiddingController extends Controller
                             </form>';
 
                 if (isset($result['url_source']) && $result['url_source']) {
-                    $html .= '<a href="' . $result['url_source'] . '" target="_blank" class="btn btn-info btn-sm">
+                    $html .= '<a href="' . htmlspecialchars($result['url_source']) . '" target="_blank" class="btn btn-info btn-sm">
                         <i class="fas fa-external-link-alt me-1"></i> Ver Original
                     </a>';
                 }
@@ -490,73 +583,90 @@ class BiddingController extends Controller
                     </div>
                 </div>';
             }
-
-            $html .= '</div>
+        } else {
+            $html .= '<div class="col-12">
+                <div class="alert alert-info">
+                    <i class="fas fa-info-circle me-2"></i> Nenhuma licitação encontrada com os filtros informados.
                 </div>
             </div>';
         }
+	$html .= '</div>
+            </div>
+        </div>';
+    }
 
-        $html .= '</div>';
+    $html .= '</div>';
 
-        // Incluir o footer
-        if (file_exists(resource_path('views/layout/footer.php'))) {
-            ob_start();
-            include(resource_path('views/layout/footer.php'));
-            $html .= ob_get_clean();
-        } else {
-            $html .= '<footer class="bg-light py-3 mt-5">
-                <div class="container">
-                    <p>&copy; ' . date('Y') . ' Sistema de Licitações</p>
-                </div>
-            </footer>';
-        }
+    // Incluir o footer
+    if (file_exists(resource_path('views/layout/footer.php'))) {
+        ob_start();
+        include(resource_path('views/layout/footer.php'));
+        $html .= ob_get_clean();
+    } else {
+        $html .= '<footer class="bg-light py-3 mt-5">
+            <div class="container">
+                <p>&copy; ' . date('Y') . ' Sistema de Licitações</p>
+            </div>
+        </footer>';
+    }
 
-        $html .= '<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
-        <script>
-            $(document).ready(function() {
-                // Inicializar Select2
-                $(".select2").select2({
-                    theme: "bootstrap-5",
-                    width: "100%"
-                });
+    $html .= '<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            // Inicializar Select2
+            $(".select2").select2({
+                theme: "bootstrap-5",
+                width: "100%"
+            });
 
-                // Configurar seleção de "Todas as Fontes"
-                $("#sources").on("select2:select", function (e) {
-                    if (e.params.data.id === "all") {
-                        $(this).val("all").trigger("change");
-                    } else {
-                        // Se selecionar uma fonte específica, remover a opção "Todas"
-                        var values = $(this).val();
-                        if (values && values.includes("all")) {
-                            values = values.filter(v => v !== "all");
-                            $(this).val(values).trigger("change");
-                        }
+            // Configurar seleção de "Todas as Fontes"
+            $("#sources").on("select2:select", function (e) {
+                if (e.params.data.id === "all") {
+                    $(this).val("all").trigger("change");
+                } else {
+                    // Se selecionar uma fonte específica, remover a opção "Todas"
+                    var values = $(this).val();
+                    if (values && values.includes("all")) {
+                        values = values.filter(v => v !== "all");
+                        $(this).val(values).trigger("change");
                     }
-                });
-
-                // Atualizar datas com valores padrão
-                const startDateInput = document.getElementById("start_date");
-                const endDateInput = document.getElementById("end_date");
-
-                if (startDateInput && !startDateInput.value) {
-                    const oneMonthAgo = new Date();
-                    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-                    startDateInput.value = oneMonthAgo.toISOString().split("T")[0];
-                }
-
-                if (endDateInput && !endDateInput.value) {
-                    const today = new Date();
-                    endDateInput.value = today.toISOString().split("T")[0];
                 }
             });
-        </script>
-        </body>
-        </html>';
 
-        return response($html);
-    }
+            // Mostrar loader ao submeter o formulário
+            $("#searchForm").on("submit", function() {
+                $("#searchButton").prop("disabled", true);
+                $("#searchLoader").show();
+            });
+
+            // Mostrar loader ao importar licitação
+            $(".import-form").on("submit", function() {
+                $(this).find("button").prop("disabled", true).html(\'<i class="fas fa-spinner fa-spin"></i> Importando...\');
+            });
+
+            // Atualizar datas com valores padrão se estiverem vazias
+            const startDateInput = document.getElementById("start_date");
+            const endDateInput = document.getElementById("end_date");
+
+            if (startDateInput && !startDateInput.value) {
+                const oneMonthAgo = new Date();
+                oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+                startDateInput.value = oneMonthAgo.toISOString().split("T")[0];
+            }
+
+            if (endDateInput && !endDateInput.value) {
+                const today = new Date();
+                endDateInput.value = today.toISOString().split("T")[0];
+            }
+        });
+    </script>
+    </body>
+    </html>';
+
+    return response($html);
+}
 
 
     private function renderSearchResults($searchResults, $source)
