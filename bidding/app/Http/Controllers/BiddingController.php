@@ -39,8 +39,9 @@ class BiddingController extends Controller
     public function create()
     {
         $companies = Company::orderBy('name')->get();
+        $errors = session()->get('errors', new \Illuminate\Support\MessageBag);
 
-        $content = $this->renderCreate($companies);
+        $content = $this->renderCreate($companies, $errors);
         return response($content);
     }
 
@@ -974,7 +975,7 @@ public function showSearchForm(Request $request)
                                                 <td><?= $bidding->title ?></td>
                                                 <td><?= $bidding->company->name ?></td>
                                                 <td><?= $bidding->modality ?></td>
-                                                <td><?= $bidding->opening_date->format('d/m/Y H:i') ?></td>
+                                                <td><?= $bidding->opening_date ? date('d/m/Y H:i', strtotime($bidding->opening_date)) : 'Não informada' ?></td>
                                                 <td>
                                                     <?= $bidding->estimated_value
                                                     ? 'R$ ' . number_format($bidding->estimated_value, 2, ',', '.')
@@ -1066,8 +1067,13 @@ public function showSearchForm(Request $request)
     return ob_get_clean();
 }
 
-private function renderCreate($companies)
+private function renderCreate($companies, $errors = null)
 {
+
+    if (!$errors) {
+        $errors = new \Illuminate\Support\MessageBag;
+    }
+
     ob_start();
     ?>
     <!DOCTYPE html>

@@ -18,7 +18,9 @@ class CompanyController extends Controller
 
     public function create()
     {
-        $content = $this->renderCreate();
+        $errors = session()->get('errors', new \Illuminate\Support\MessageBag);
+
+        $content = $this->renderCreate($errors);
         return response($content);
     }
 
@@ -217,8 +219,12 @@ class CompanyController extends Controller
         return ob_get_clean();
     }
 
-    private function renderCreate()
+    private function renderCreate($errors = null)
     {
+        if (!$errors) {
+            $errors = new \Illuminate\Support\MessageBag;
+        }
+
         ob_start();
         ?>
         <!DOCTYPE html>

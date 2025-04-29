@@ -5,37 +5,60 @@ namespace App\Http\Controllers;
 use App\Models\Bidding;
 use App\Models\Proposal;
 use Illuminate\Http\Request;
+use Illuminate\Support\MessageBag;
 
 class DashboardController extends Controller
 {
     public function index()
     {
-        $activeCount = Bidding::where('status', 'active')->count();
-        $pendingCount = Bidding::where('status', 'pending')->count();
-        $finishedCount = Bidding::where('status', 'finished')->count();
+        // Obter dados das licitações
+        $activeBiddings = Bidding::where('status', 'active')->count();
+        $pendingBiddings = Bidding::where('status', 'pending')->count();
+        $finishedBiddings = Bidding::where('status', 'finished')->count();
 
+        // Obter dados das propostas
         $submittedProposals = Proposal::where('status', 'submitted')->count();
         $wonProposals = Proposal::where('status', 'won')->count();
         $lostProposals = Proposal::where('status', 'lost')->count();
 
+        // Obter licitações recentes
         $recentBiddings = Bidding::orderBy('created_at', 'desc')
             ->limit(5)
             ->get();
 
-        // Carregamos a visão diretamente com PHP
+        // Inicializar a variável $errors
+        $errors = session()->get('errors', new MessageBag);
+
+        // Renderizar o dashboard
         $content = $this->renderDashboard(
-            $activeCount, $pendingCount, $finishedCount,
-            $submittedProposals, $wonProposals, $lostProposals,
-            $recentBiddings
+            $activeBiddings,
+            $pendingBiddings,
+            $finishedBiddings,
+            $submittedProposals,
+            $wonProposals,
+            $lostProposals,
+            $recentBiddings,
+            $errors
         );
 
         return response($content);
     }
 
-    private function renderDashboard($activeCount, $pendingCount, $finishedCount,
-                                    $submittedProposals, $wonProposals, $lostProposals,
-                                    $recentBiddings)
-    {
+    private function renderDashboard(
+        $activeCount,
+        $pendingCount,
+        $finishedCount,
+        $submittedProposals,
+        $wonProposals,
+        $lostProposals,
+        $recentBiddings,
+        $errors = null
+    ) {
+        // Se $errors não for fornecido, crie um MessageBag vazio
+        if (!$errors) {
+            $errors = new MessageBag;
+        }
+
         ob_start();
         ?>
         <!DOCTYPE html>
@@ -134,7 +157,9 @@ class DashboardController extends Controller
                                             <tr>
                                                 <td><?= $bidding->bidding_number ?></td>
                                                 <td><?= $bidding->title ?></td>
-                                                <td><?= $bidding->opening_date->format('d/m/Y') ?></td>
+                                                <td>
+                                                    <?= $bidding->opening_date ? date('d/m/Y', strtotime($bidding->opening_date)) : 'Não informada' ?>
+                                                </td>
                                                 <td>
                                                     <?php if ($bidding->status == 'active'): ?>
                                                         <span class="badge bg-primary">Ativa</span>

@@ -56,18 +56,18 @@ $content = ob_start();
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <h6>Data de Abertura:</h6>
-                        <p><?= $bidding->opening_date->format('d/m/Y H:i') ?></p>
+                        <p><?= isset($bidding->opening_date) ? (is_string($bidding->opening_date) ? date('d/m/Y H:i', strtotime($bidding->opening_date)) : $bidding->opening_date->format('d/m/Y H:i')) : 'Não informada' ?></p>
                     </div>
                     <div class="col-md-6">
                         <h6>Data de Encerramento:</h6>
-                        <p><?= $bidding->closing_date ? $bidding->closing_date->format('d/m/Y H:i') : 'Não definida' ?></p>
+                        <p><?= isset($bidding->closing_date) && $bidding->closing_date ? (is_string($bidding->closing_date) ? date('d/m/Y H:i', strtotime($bidding->closing_date)) : $bidding->closing_date->format('d/m/Y H:i')) : 'Não definida' ?></p>
                     </div>
                 </div>
 
                 <div class="row mb-3">
                     <div class="col-md-6">
                         <h6>Data de Publicação:</h6>
-                        <p><?= $bidding->publication_date ? $bidding->publication_date->format('d/m/Y') : 'Não definida' ?></p>
+                        <p><?= isset($bidding->publication_date) && $bidding->publication_date ? (is_string($bidding->publication_date) ? date('d/m/Y', strtotime($bidding->publication_date)) : $bidding->publication_date->format('d/m/Y')) : 'Não definida' ?></p>
                     </div>
                     <div class="col-md-6">
                         <h6>Valor Estimado:</h6>
@@ -402,34 +402,49 @@ $scripts = <<<HTML
                 }
             });
 
-            // Preparar dados para gráfico de valores
-            const proposalValues = [
-                <?php foreach ($bidding->proposals as $proposal): ?>
-                {
-                    value: <?= $proposal->value ?>,
-                    status: '<?= $proposal->status ?>'
-                },
-                <?php endforeach; ?>
-            ];
-
             // Gráfico de valores
             const valueCtx = document.getElementById('proposalValueChart').getContext('2d');
             new Chart(valueCtx, {
                 type: 'bar',
                 data: {
-                    labels: proposalValues.map((_, i) => `Proposta ${i+1}`),
+                    labels: [
+                        <?php
+                        $i = 1;
+                        foreach ($bidding->proposals as $proposal):
+                            echo '"Proposta ' . $i . '"';
+                            if ($i < count($bidding->proposals)) echo ", ";
+                            $i++;
+                        endforeach;
+                        ?>
+                    ],
                     datasets: [{
                         label: 'Valor da Proposta (R$)',
-                        data: proposalValues.map(p => p.value),
-                        backgroundColor: proposalValues.map(p => {
-                            switch(p.status) {
-                                case 'draft': return '#6c757d';
-                                case 'submitted': return '#0d6efd';
-                                case 'won': return '#198754';
-                                case 'lost': return '#dc3545';
-                                default: return '#6c757d';
-                            }
-                        })
+                        data: [
+                            <?php
+                            foreach ($bidding->proposals as $key => $proposal):
+                                echo $proposal->value;
+                                if ($key < count($bidding->proposals) - 1) echo ", ";
+                            endforeach;
+                            ?>
+                        ],
+                        backgroundColor: [
+                            <?php
+                            foreach ($bidding->proposals as $key => $proposal):
+                                switch($proposal->status) {
+                                    case 'draft': echo "'#6c757d'";
+                                        break;
+                                    case 'submitted': echo "'#0d6efd'";
+                                        break;
+                                    case 'won': echo "'#198754'";
+                                        break;
+                                    case 'lost': echo "'#dc3545'";
+                                        break;
+                                    default: echo "'#6c757d'";
+                                }
+                                if ($key < count($bidding->proposals) - 1) echo ", ";
+                            endforeach;
+                            ?>
+                        ]
                     }]
                 },
                 options: {

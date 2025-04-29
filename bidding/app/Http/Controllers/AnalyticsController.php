@@ -6,6 +6,7 @@ use App\Models\Bidding;
 use App\Models\Proposal;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\MessageBag;
 
 class AnalyticsController extends Controller
 {
@@ -46,17 +47,24 @@ class AnalyticsController extends Controller
             ->get();
 
         // Top 5 maiores licitações ganhas
-        $topWonBiddings = Proposal::with('bidding')
+        $topWonBiddings = Proposal::with(['bidding', 'bidding.company'])
             ->where('status', 'won')
             ->orderBy('value', 'desc')
             ->limit(5)
             ->get();
 
+        // Inicializar a variável $errors
+        $errors = session()->get('errors', new MessageBag);
+
+        // Definir a variável $months que está faltando
+        $months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+
         $content = $this->renderDashboard(
             $totalBiddings, $activeBiddings, $finishedBiddings,
             $totalProposals, $wonProposals, $lostProposals,
             $totalWonValue, $avgProfitMargin,
-            $biddingsByMonth, $wonValueByMonth, $topWonBiddings
+            $biddingsByMonth, $wonValueByMonth, $topWonBiddings,
+            $months, $errors
         );
 
         return response($content);
@@ -66,8 +74,19 @@ class AnalyticsController extends Controller
         $totalBiddings, $activeBiddings, $finishedBiddings,
         $totalProposals, $wonProposals, $lostProposals,
         $totalWonValue, $avgProfitMargin,
-        $biddingsByMonth, $wonValueByMonth, $topWonBiddings
+        $biddingsByMonth, $wonValueByMonth, $topWonBiddings,
+        $months = null, $errors = null
     ) {
+        // Se $months não for fornecido, inicialize com valores padrão
+        if (!$months) {
+            $months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+        }
+
+        // Se $errors não for fornecido, crie um MessageBag vazio
+        if (!$errors) {
+            $errors = new MessageBag;
+        }
+
         ob_start();
         ?>
         <!DOCTYPE html>
@@ -206,12 +225,12 @@ class AnalyticsController extends Controller
                                 <tbody>
                                     <?php foreach ($topWonBiddings as $proposal): ?>
                                         <tr>
-                                            <td><?= $proposal->bidding->title ?></td>
-                                            <td><?= $proposal->bidding->bidding_number ?></td>
-                                            <td><?= $proposal->bidding->company->name ?></td>
+                                            <td><?= isset($proposal->bidding) ? $proposal->bidding->title : 'N/D' ?></td>
+                                            <td><?= isset($proposal->bidding) ? $proposal->bidding->bidding_number : 'N/D' ?></td>
+                                            <td><?= isset($proposal->bidding->company) ? $proposal->bidding->company->name : 'N/D' ?></td>
                                             <td>R$ <?= number_format($proposal->value, 2, ',', '.') ?></td>
                                             <td><?= $proposal->profit_margin ? number_format($proposal->profit_margin, 2, ',', '.') . '%' : 'N/D' ?></td>
-                                            <td><?= $proposal->created_at->format('d/m/Y') ?></td>
+                                            <td><?= $proposal->created_at ? date('d/m/Y', strtotime($proposal->created_at)) : 'N/D' ?></td>
                                         </tr>
                                     <?php endforeach; ?>
                                 </tbody>
@@ -227,9 +246,6 @@ class AnalyticsController extends Controller
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <script>
                 document.addEventListener('DOMContentLoaded', function() {
-                    // Preparar dados para gráficos
-                    const months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
-
                     // Gráfico de licitações por mês
                     const biddingsByMonthCtx = document.getElementById('biddingsByMonthChart').getContext('2d');
                     const biddingsByMonthData = {
